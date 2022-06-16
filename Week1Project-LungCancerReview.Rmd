@@ -1,0 +1,176 @@
+---
+title: "Lung Cancer"
+author: "KZ"
+date: '2022-06-15'
+output: html_document
+---
+
+This project will use the lung cancer dataset to create demographic summarise tables using the package from TableOne, with a main focus on stage 4 patient and also the immunotherapy.
+
+### Loading Packages and Dataset
+Pacman is very useful package for loading and installing the multiple packages;
+Note - **there is no package called `googlesheets`**.
+
+```{r packages, include=FALSE}
+#install.packages(c("pacman"))
+library(pacman)
+pacman::p_load(tableone,survival,stargazer,install=TRUE)
+pacman::p_load(RPostgreSQL,plyr,dplyr,tidyr,reshape2,
+               #googlesheets,
+               data.table,openxlsx,googledrive,Hmisc,
+               stringr,stringi,bigrquery,googlesheets4,
+               comorbidity,tidyverse,
+               install = TRUE)
+```
+
+### Loading the Lung Cancer dataset
+This part will initialize the dataset from Google Drive folder, where the folder path about output and csv might need to be updated;
+The output path should direct the generated files to the folder you want to save, and the csv path should direct to the folder saving all the data files.
+```{r data accessing, include=FALSE, echo=FALSE}
+bq_auth(email=TRUE)
+drive_auth(email = TRUE)
+con <- dbConnect(bigrquery::bigquery(),  project = "bigquery-408fd9e5",  dataset = "seid")
+
+
+# point to google drive folders
+OUTPUT <- '1tclgDVdHQrpmCYH_pfjzHfW_LATdaYOu' #direction to the internship folder of Ke Zeng
+INPUT <- as.data.frame(drive_ls(as_id('11BHDJnJ4TYY-yY012X7pgwNc5yxb-z7z')))
+# assign list of input docs and SMV CSVs to data frame 
+CSV <- as.data.frame(drive_ls(as_id('1MpR_0B-hfDudnrBccTvtmMxkpwPPiVce')))
+
+### Load SMV Export ###
+CSV <- subset(CSV, grepl('csv', name)) %>% arrange(name)
+for (i in 1:nrow(CSV)) {  
+  filename_str <- CSV$name[i]  
+  temp <- drive_download(file = as_id(CSV$id[CSV$name == filename_str]), overwrite = TRUE)  
+  df <- read.csv(filename_str, stringsAsFactors = F)  
+  file.remove(filename_str)    
+  assign(paste0(gsub('.csv', '', filename_str), '0'), df)
+  }
+```
+
+
+```{r workbook}
+# Create a blank workbook
+OUTWB <- createWorkbook()
+```
+
+### Stage4 Patients
+This section will firstly take a look on the whole patient stages and identify those in the stage 4.
+```{r stages}
+table.stages = stage0 %>% group_by(stage) %>% summarise(n=n()) %>%
+   filter(str_detect(stage, "4"))
+table.stages
+```
+
+We identify 4 different categories of stage 4 patients. Then we need to find these patients from the list and collect the id to know who is in stage 4.
+
+Note - patients' characteristics of height and weight are measured multiple times with multiple time frames, so it will be difficult to get a real value.
+
+table.a = height_weight0 %>%
+  group_by(mpid,value_type) %>%
+  mutate(minAccessedDate = min(assessed_timedelta)) %>%
+  ungroup() %>%
+  filter(assessed_timedelta == minAccessedDate) %>%
+  select(mpid,value_type,standardized_value)
+
+```{r stage4 patients}
+table.patientstage4 = stage0 %>%
+  filter(stage %in% table.stages$stage)
+
+table.historyofcancer = personal_history_of_cancer0 %>% group_by(mpid) %>% mutate(ncancer = n()) %>%
+  ungroup() %>%
+  select(mpid,icd_code) %>%
+  spread(key = c("mpid"), value= c("icd_code"))
+  
+  reshape(.,
+          idvar = c("mpid","ncancer"),
+          v.names = c("icd_code","personal_history_of_cancer_diagnosed_timedelta"),
+          direction = "wide")
+
+reshape(data = dt,
+        idvar = c("Area", "Type"),
+        v.names = c("Y2020", "Y2021", "Y2022"),
+        timevar = "Scenario",
+        direction = "wide")
+
+table.patients4.demo = patient0 %>%
+  left_join(.,tobacco_history0,by="mpid",suffix=c(".pt",".tbch")) %>%
+  left_join(.,personal_history_of_cancer0,by="mpid",suffix=c(".pt",".phc")) %>%
+  filter(mpid %in% table.patientstage4$mpid)
+table.patients4.demo %>% head()
+```
+Table One on these patient demographics.
+```{r patients4 tableone}
+colnames(table.patients4.demo)
+myVars = c("age_at_diagnosis")
+catVars = c("sex","race","ethnicity","cause_of_death")
+  
+  
+head(performance_status0)
+performance_status0_1<-performance_status0%>%group_by(mpid)%>%dplyr::mutate(countm=n())
+performance_status0_2<-left_join(performance_status0_1,all_patients,by='mpid')
+myVars <-c("score", "method", "reported_by", "data_source", "reported_timedelta", 
+           "countm")
+tab2 <- CreateTableOne(vars = myVars, data = performance_status0_2, factorVars = myVars,strata = 'center')
+tab3<-print(tab2, showAllLevels = TRUE,test = F,digits=1)
+tab4<- as.data.frame(tab3,stringsAsFactors = F)%>%add_rownames("Name")
+```
+
+The following table shows how these patients were treated and figure out those treated by immunotherapy.
+```{r patients4 regimen}
+colnames(regimen0)
+table.patients4.regimen = regimen0 %>%
+  filter(mpid %in% table.patientstage4$mpid)
+table.patients4.regimen %>% 
+  filter(str_detect(regimen_name, 
+                    regex("mab",ignore_case = TRUE)))
+```
+### Lab - Table One
+This section adapts the code of creating Table One on the Lab dataframe.
+
+#### Lab - Glance
+I do not have the dataframe `all_patients`. The lab_test number is combined to the similar dataframe named `patient0`.
+```{r Lab}
+head(lab_test0)
+colnames(lab_test0)
+lab_test0_1<-lab_test0%>%group_by(mpid)%>%dplyr::mutate(countm=n())
+# regimen0_2<-left_join(regimen0_1,all_patients,by='mpid')
+lab_test0_2 = left_join(lab_test0_1,patient0,by='mpid')
+```
+#### Lab - TableOne
+This section creates the table one.
+
+```{r labTableOne}
+myVars = c("quantitative_result","lab_timedelta","countm") # normal variable can be directly summarised
+catVars = c("lab_name","assessed","unit","data_source") # categorical variables need transformation
+tab2 <- CreateTableOne(vars = myVars, data = lab_test0_2, factorVars = catVars, strata = 'sex',test = 'F')
+tab3<-print(tab2, showAllLevels = TRUE,test=F)
+tab4<- as.data.frame(tab3,stringsAsFactors = F)%>%add_rownames("Name")
+#write in the excel file
+addWorksheet(OUTWB, "lab0")
+writeData(OUTWB, sheet = "lab0", x = as.data.frame(tab4))
+```
+
+#### Lab - saving and upload
+Note - you need to change the `OUTPUT` variable to the direction path you want to link
+```{r saving and upload}
+# Export the file
+#save to google drive;
+#https://drive.google.com/drive/folders/1U_erSDt-ikObDdd_lLHkoYFeMHAwOWdW
+OUTPUT <- '14iIQdH8HbBAeUnJorndRWfimfUpOG7lq'
+
+# write output to google drive
+filename_str <- paste0('TableOneLab_', 
+                       gsub('-', '', Sys.Date()), 
+                       '.xlsx')
+
+saveWorkbook(OUTWB,filename_str)
+drive_upload(filename_str, 
+             path = as_id(OUTPUT), 
+             overwrite = T)
+file.remove(filename_str)
+```
+
+
+
